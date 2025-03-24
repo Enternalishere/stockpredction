@@ -1,242 +1,145 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
-from sklearn.model_selection import train_test_split
+import mplfinance as mpf
+import yfinance as yf
+import threading
+import joblib
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.metrics import r2_score, mean_absolute_error
+from xgboost import XGBRegressor
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_absolute_error
 
 # Define global variables
 df = None
 model = None
+model_type = "RandomForest"
 
-def load_nifty_data():
-    global df
+# Function to fetch real-time stock data
+def fetch_stock_data(stock_symbol):
     try:
-        filename = "C:/Users/HP/Desktop/stock prediction/NIFTY NEXT 50-16-03-2023-to-16-03-2024.csv"
-        df = pd.read_csv(filename)
-        df.columns = df.columns.str.strip()
-        messagebox.showinfo("Success", "Nifty data loaded successfully!")
-        print(df.head())  # Print the first few rows of the DataFrame
+        stock = yf.Ticker(stock_symbol)
+        data = stock.history(period="1y")
+        data.reset_index(inplace=True)
+        return data
     except Exception as e:
         messagebox.showerror("Error", str(e))
+        return None
 
-def plot_close_graph():
-    global df
-    if df is None:
-        messagebox.showerror("Error", "Please load data first.")
+# Function to plot candlestick chart
+def plot_candlestick_chart(stock_symbol):
+    data = fetch_stock_data(stock_symbol)
+    if data is None or data.empty:
+        messagebox.showerror("Error", "Failed to fetch stock data.")
         return
+    
+    data.set_index("Date", inplace=True)
+    mpf.plot(data, type='candle', style='charles', title=f"Candlestick Chart: {stock_symbol}", volume=True)
 
-    try:
-        plt.figure(figsize=(14, 7))
-        plt.plot(df['Date'], df['Close'], label='Close Price', color='blue')
-        plt.title('Historical Close Prices')
-        plt.xlabel('Date')
-        plt.ylabel('Close Price')
-        plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))  
-        plt.gca().xaxis.set_major_locator(mdates.AutoDateLocator())  
-        plt.xticks(rotation=45) 
-        plt.legend()
-        plt.tight_layout()
-        plt.show()
-    except Exception as e:
-        messagebox.showerror("Error", str(e))
+# Feature Engineering
+def prepare_features(data):
+    data['Close_Lag1'] = data['Close'].shift(1)
+    data['SMA_5'] = data['Close'].rolling(window=5).mean()
+    data['SMA_10'] = data['Close'].rolling(window=10).mean()
+    data['RSI'] = 100 - (100 / (1 + data['Close'].pct_change().rolling(14).mean()))
+    data.dropna(inplace=True)
+    return data
 
-def plot_open_close_graph():
-    global df
-    if df is None:
-        messagebox.showerror("Error", "Please load data first.")
+# Train ML Model
+def train_model(stock_symbol):
+    global model
+    data = fetch_stock_data(stock_symbol)
+    if data is None or data.empty:
+        messagebox.showerror("Error", "Failed to fetch stock data.")
         return
-
-    try:
-        plt.figure(figsize=(14, 7))
-        plt.plot(df['Date'], df['Open'], label='Open Price', color='green')
-        plt.plot(df['Date'], df['Close'], label='Close Price', color='blue')
-        plt.title('Historical Open and Close Prices')
-        plt.xlabel('Date')
-        plt.ylabel('Price')
-        plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))  
-        plt.gca().xaxis.set_major_locator(mdates.AutoDateLocator())  
-        plt.xticks(rotation=45) 
-        plt.legend()
-        plt.tight_layout()
-        plt.show()
-    except Exception as e:
-        messagebox.showerror("Error", str(e))
-
-def plot_low_high_graph():
-    global df
-    if df is None:
-        messagebox.showerror("Error", "Please load data first.")
+    
+    data = prepare_features(data)
+    X = data[['Close_Lag1', 'SMA_5', 'SMA_10', 'RSI']]
+    y = data['Close']
+    
+    if len(X) < 2:
+        messagebox.showerror("Error", "Not enough data to train the model.")
         return
+    
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    
+    if model_type == "RandomForest":
+        model = RandomForestRegressor(n_estimators=100, random_state=42)
+    else:
+        model = XGBRegressor(objective="reg:squarederror", n_estimators=100)
+    
+    model.fit(X_train, y_train)
+    joblib.dump(model, "stock_model.pkl")
+    
+    predictions = model.predict(X_test)
+    mae = mean_absolute_error(y_test, predictions)
+    
+    messagebox.showinfo("Model Training", f"Model trained successfully!\nMean Absolute Error: {mae:.2f}")
 
-    try:
-        plt.figure(figsize=(14, 7))
-        plt.plot(df['Date'], df['Low'], label='Low Price', color='red')
-        plt.plot(df['Date'], df['High'], label='High Price', color='orange')
-        plt.title('Historical Low and High Prices')
-        plt.xlabel('Date')
-        plt.ylabel('Price')
-        plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))  
-        plt.gca().xaxis.set_major_locator(mdates.AutoDateLocator())  
-        plt.xticks(rotation=45) 
-        plt.legend()
-        plt.tight_layout()
-        plt.show()
-    except Exception as e:
-        messagebox.showerror("Error", str(e))
-
-def train_model():
-    global df, model
-    if df is None:
-        messagebox.showerror("Error", "Please load data first.")
+# Predict future stock prices
+def predict_future(stock_symbol):
+    global model
+    if model is None:
+        messagebox.showerror("Error", "Please train the model first.")
         return
-
-    try:
-        # Create a new column with lagged closing prices for prediction
-        df['Close_lag1'] = df['Close'].shift(1)
-        
-        # Drop any rows with NaN values that were created due to shifting
-        df.dropna(inplace=True)
-        
-        # Define the features and target variable for the model
-        features = df[['Close_lag1']]  # Use lagged 'Close' column as the feature
-        target = df['Close']
-        
-        X_train, _, y_train, _ = train_test_split(features, target, test_size=0.2, random_state=42, shuffle=False)
-        
-        model = RandomForestRegressor(random_state=42)
-        model.fit(X_train, y_train)
-        messagebox.showinfo("Success", "Model trained successfully!")
-    except Exception as e:
-        messagebox.showerror("Error", str(e))
-
-def calculate_accuracy():
-    global df, model
-    if df is None or model is None:
-        messagebox.showerror("Error", "Please load data and train model first.")
+    
+    data = fetch_stock_data(stock_symbol)
+    if data is None or data.empty:
         return
+    
+    data = prepare_features(data)
+    X = data[['Close_Lag1', 'SMA_5', 'SMA_10', 'RSI']]
+    
+    predictions = model.predict(X)
+    
+    plt.figure(figsize=(12, 6))
+    plt.plot(data['Date'], data['Close'], label="Actual Price", color='blue')
+    plt.plot(data['Date'], predictions, label="Predicted Price", color='red', linestyle='dashed')
+    plt.xlabel("Date")
+    plt.ylabel("Stock Price")
+    plt.title(f"Predicted vs Actual Prices: {stock_symbol}")
+    plt.legend()
+    plt.xticks(rotation=45)
+    plt.show()
 
-    try:
-        # Prepare data for prediction
-        df['Close_lag1'] = df['Close'].shift(1)
-        df.dropna(inplace=True)
-        features = df[['Close_lag1']]
-        target = df['Close']
+# Create Tkinter GUI
+root = tk.Tk()
+root.title("Stock Prediction Tool")
+root.geometry("600x400")
 
-        # Make predictions
-        predictions = model.predict(features)
+# UI Elements
+stock_label = tk.Label(root, text="Enter Stock Symbol:")
+stock_label.pack()
+stock_entry = tk.Entry(root)
+stock_entry.pack()
 
-        # Calculate accuracy
-        r_squared = r2_score(target, predictions)
-        mae = mean_absolute_error(target, predictions)
+def set_model_rf():
+    global model_type
+    model_type = "RandomForest"
 
-        messagebox.showinfo("Accuracy", f"R-squared Score: {r_squared:.2f}\nMean Absolute Error: {mae:.2f}")
-    except Exception as e:
-        messagebox.showerror("Error", str(e))
+def set_model_xgb():
+    global model_type
+    model_type = "XGBoost"
 
-def plot_predicted_vs_actual():
-    global df, model
-    if df is None or model is None:
-        messagebox.showerror("Error", "Please load data and train model first.")
-        return
+model_label = tk.Label(root, text="Select Model:")
+model_label.pack()
+rf_button = ttk.Button(root, text="RandomForest", command=set_model_rf)
+rf_button.pack()
+xgb_button = ttk.Button(root, text="XGBoost", command=set_model_xgb)
+xgb_button.pack()
 
-    try:
-        # Prepare data for prediction
-        df['Close_lag1'] = df['Close'].shift(1)
-        df.dropna(inplace=True)
-        features = df[['Close_lag1']]
-        target = df['Close']
+fetch_button = ttk.Button(root, text="Fetch Data", command=lambda: fetch_stock_data(stock_entry.get()))
+fetch_button.pack()
 
-        # Make predictions
-        predictions = model.predict(features)
+candlestick_button = ttk.Button(root, text="Candlestick Chart", command=lambda: plot_candlestick_chart(stock_entry.get()))
+candlestick_button.pack()
 
-        # Plot actual vs. predicted closing prices
-        plt.figure(figsize=(14, 7))
-        plt.plot(df['Date'], target, label='Actual Closing Prices', color='blue')
-        plt.plot(df['Date'], predictions, label='Predicted Closing Prices', color='red', linestyle='--')
-        plt.title('Actual vs. Predicted Closing Prices')
-        plt.xlabel('Date')
-        plt.ylabel('Closing Price')
-        plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))  
-        plt.gca().xaxis.set_major_locator(mdates.AutoDateLocator())  
-        plt.xticks(rotation=45) 
-        plt.legend()
-        plt.tight_layout()
-        plt.show()
-    except Exception as e:
-        messagebox.showerror("Error", str(e))
+train_button = ttk.Button(root, text="Train Model", command=lambda: train_model(stock_entry.get()))
+train_button.pack()
 
-def show_predicted_data_table():
-    global df, model
-    if df is None or model is None:
-        messagebox.showerror("Error", "Please load data and train model first.")
-        return
+predict_button = ttk.Button(root, text="Predict Future", command=lambda: predict_future(stock_entry.get()))
+predict_button.pack()
 
-    try:
-        # Prepare data for prediction
-        df['Close_lag1'] = df['Close'].shift(1)
-        df.dropna(inplace=True)
-        features = df[['Close_lag1']]
-
-        # Make predictions
-        df['Predicted_Close'] = model.predict(features)
-
-        # Display predicted data in a table
-        top = tk.Toplevel()
-        top.title("Predicted Closing Prices")
-
-        tree = ttk.Treeview(top)
-        tree["columns"] = ("Date", "Predicted Close")
-        tree.heading("#0", text="Index")
-        tree.heading("Date", text="Date")
-        tree.heading("Predicted Close", text="Predicted Close")
-        
-        for index, row in df.iterrows():
-            tree.insert("", "end", text=index, values=(row['Date'], row['Predicted_Close']))
-
-        tree.pack(expand=True, fill="both")
-    except Exception as e:
-        messagebox.showerror("Error", str(e))
-
-def main():
-    root = tk.Tk()
-    root.title("Data Analysis Tool")
-
-    # Load Nifty Data button
-    nifty_button = ttk.Button(root, text="Load Nifty Data", command=load_nifty_data)
-    nifty_button.pack(pady=5)
-
-    # Train Model button
-    train_button = ttk.Button(root, text="Train Model", command=train_model)
-    train_button.pack(pady=5)
-
-    # Plot Close Graph button
-    close_button = ttk.Button(root, text="Plot Close Graph", command=plot_close_graph)
-    close_button.pack(pady=5)
-
-    # Plot Open-Close Graph button
-    open_close_button = ttk.Button(root, text="Plot Open-Close Graph", command=plot_open_close_graph)
-    open_close_button.pack(pady=5)
-
-    # Plot Low-High Graph button
-    low_high_button = ttk.Button(root, text="Plot Low-High Graph", command=plot_low_high_graph)
-    low_high_button.pack(pady=5)
-
-    # Calculate Accuracy button
-    accuracy_button = ttk.Button(root, text="Calculate Accuracy", command=calculate_accuracy)
-    accuracy_button.pack(pady=5)
-
-    # Plot Predicted vs. Actual Graph button
-    predicted_vs_actual_button = ttk.Button(root, text="Plot Predicted vs. Actual Graph", command=plot_predicted_vs_actual)
-    predicted_vs_actual_button.pack(pady=5)
-
-    # Show Predicted Data Table button
-    predicted_data_button = ttk.Button(root, text="Show Predicted Data Table", command=show_predicted_data_table)
-    predicted_data_button.pack(pady=5)
-
-    root.mainloop()
-
-if __name__ == "__main__":
-    main()
+root.mainloop()
